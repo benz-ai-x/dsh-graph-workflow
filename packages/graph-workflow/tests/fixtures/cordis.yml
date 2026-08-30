@@ -1,0 +1,17 @@
+- name: '@deepseek-ai/dsh-agent'
+- name: '@deepseek-ai/dsh-system-prompt'
+- name: '@deepseek-ai/dsh-tools'
+- name: '@deepseek-ai/dsh-skill'
+- name: '@deepseek-ai/dsh-workflow'
+- name: 'dsh-graph-workflow'
+  config:
+    storageFile: '__STORAGE_FILE__'
+    maxWorkflows: 8
+    maxNodesPerWorkflow: 4
+    maxInputChars: 2000
+    maxPromptChars: 2000
+    maxSkillChars: 4000
+    maxResultChars: 8000
+    maxActiveRunsPerAgent: 2
+    retainedRuns: 3
+    seedExample: true

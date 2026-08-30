@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "references": [
+    { "path": "./packages/graph-workflow/tsconfig.host.json" },
+    { "path": "./packages/graph-workflow/tsconfig.client.json" }
+  ]
+}

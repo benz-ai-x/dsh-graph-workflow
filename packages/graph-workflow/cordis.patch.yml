@@ -1,0 +1,14 @@
+- insert:
+    - id: graph-workflow
+      name: 'dsh-graph-workflow'
+      config:
+        storageFile: '.dsh/graph-workflows.json'
+        maxWorkflows: 100
+        maxNodesPerWorkflow: 32
+        maxInputChars: 20000
+        maxPromptChars: 12000
+        maxSkillChars: 50000
+        maxResultChars: 50000
+        maxActiveRunsPerAgent: 4
+        retainedRuns: 50
+        seedExample: true
