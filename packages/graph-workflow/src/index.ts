@@ -2,10 +2,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import type { GraphWorkflowLimits, StartGraphWorkflowRequest } from './domain.ts'
-import { XIAOHONGSHU_WORKFLOW, catalogEntries } from './domain.ts'
+import { catalogEntries } from './domain.ts'
 import { GraphWorkflowError } from './errors.ts'
 import { GraphWorkflowService, type GraphWorkflowServiceLimits } from './service.ts'
-import { GraphWorkflowStore, seedWorkflow } from './store.ts'
+import { GraphWorkflowStore } from './store.ts'
 
 export type * from './domain.ts'
 export { GraphWorkflowError, type GraphWorkflowErrorCode } from './errors.ts'
@@ -14,7 +14,9 @@ export { GraphWorkflowService, type GraphWorkflowServiceLimits } from './service
 export { GraphWorkflowStore } from './store.ts'
 
 export const name = 'graph-workflow'
-export const inject = ['tools', 'workflowEngine', 'skills', 'agents']
+// The Web profile owns one workflowEngine inside each live Agent preset rather
+// than on the Host root. Execution resolves that exact Agent-scoped service.
+export const inject = ['tools', 'skills', 'llm', 'agents', 'workspaceRegistry']
 
 /** Deployment policy for storage, definition size, execution, and retention. */
 export interface Config {
@@ -53,7 +55,6 @@ interface ResolvedConfig extends GraphWorkflowLimits, GraphWorkflowServiceLimits
 export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const resolved = resolveConfig(config)
   const store = await GraphWorkflowStore.open(resolved.storageFile, resolved)
-  if (resolved.seedExample) await seedWorkflow(store, XIAOHONGSHU_WORKFLOW)
   const service = new GraphWorkflowService(ctx, store, resolved)
 
   ctx.tools.register(defineTool({
@@ -74,19 +75,26 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
     },
-    async execute() {
-      return { workflows: catalogEntries(service.catalog()) as unknown as JsonValue[] }
+    async execute(_args, exec) {
+      if (exec.agent === undefined) {
+        throw new GraphWorkflowError('list_graph_workflows requires a calling agent', 'GRAPH_WORKFLOW_AGENT_NOT_LIVE')
+      }
+      return { workflows: catalogEntries(await service.catalogForAgent(exec.agent)) as unknown as JsonValue[] }
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'run_graph_workflow',
-    description: 'Run one saved DAG workflow from structured input. Each node uses its configured prompt, optional skill and model route, passes deterministic acceptance checks, and the final accepted output is returned ready for delivery. Call list_graph_workflows first if required inputs are unknown.',
+    description: 'Run the published revision of one saved DAG workflow from structured input, or an explicit immutable revision when requested. Each node uses its configured prompt, optional skill and model route, passes deterministic acceptance checks, and the final accepted output is returned ready for delivery. Call list_graph_workflows first if required inputs are unknown.',
     parameters: {
       workflowId: {
         type: 'string',
         required: true,
         description: 'Saved lower-kebab-case workflow id, for example xiaohongshu-content.',
+      },
+      workflowRevision: {
+        type: 'integer',
+        description: 'Optional immutable saved revision. Omit to use the workflow revision currently published for production.',
       },
       input: {
         type: 'object',
@@ -102,6 +110,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         additionalProperties: false,
         properties: {
           runId: { type: 'string', required: true },
+          workspaceId: { type: 'string', required: true },
           workflowId: { type: 'string', required: true },
           workflowRevision: { type: 'integer', required: true },
           deliverable: { type: 'string', required: true },
@@ -116,6 +125,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       const request: StartGraphWorkflowRequest = {
         workflowId: args.workflowId,
         input: args.input as Readonly<Record<string, string>>,
+        ...(args.workflowRevision === undefined ? {} : { workflowRevision: args.workflowRevision }),
       }
       return await service.execute(exec.agent, request, exec.signal)
     },

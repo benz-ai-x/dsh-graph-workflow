@@ -1,0 +1,331 @@
+diff --git a/packages/client/ui-workspace/src/client/contract/slots.ts b/packages/client/ui-workspace/src/client/contract/slots.ts
+index d7f6be2c8a7dac9ff405688aaca3a42013cb5c0c..1eb9995c0c0a822260da99771b298683cc51b913 100644
+--- a/packages/client/ui-workspace/src/client/contract/slots.ts
++++ b/packages/client/ui-workspace/src/client/contract/slots.ts
+@@ -8,6 +8,13 @@
+  * - WorkspacePicker fills the conversation empty-state hole (menu + error
+  *   dialog shared with the browser).
+  *
++ * The browser additionally declares an ordered **Workspace resource-section
++ * hole** (`list` kind). Its occupants render below the built-in Sessions
++ * section for every expanded real Workspace and receive that Workspace's
++ * stable identity, path, title, Session membership and activation action.
++ * This is the extension point for sibling resources such as Workflows; it is
++ * intentionally not a global Settings surface.
++ *
+  * Each registration also declares one **directory-flow hole** (`single`
+  * kind): the slot a composed picker package's client half fills with its
+  * picking interaction — a renderless native-chooser driver or an in-app
+@@ -51,12 +58,33 @@ export interface DirectoryFlowOwnerProps {
+   onError: (message: string) => void
+ }
+ 
++/**
++ * One real Workspace projected at the point where sibling resource sections
++ * (for example Workflows) may render below the built-in Sessions section.
++ * The browser keeps ownership of Workspace navigation: an occupant can ask to
++ * activate the Workspace without importing ui-workspace implementation code.
++ */
++export interface WorkspaceSectionOwnerProps {
++  /** Stable Host Workspace identity. */
++  workspaceId: WorkspaceId
++  /** Canonical Host directory path. */
++  workspacePath: string
++  /** Current display title. */
++  workspaceTitle: string
++  /** Header-validated Session membership in Host order. */
++  sessionIds: readonly SessionId[]
++  /** Reuse or create this Workspace's blank Session and navigate to it. */
++  activateWorkspace: () => void
++}
++
+ declare module '@deepseek-ai/dsh-client-ui-slots' {
+   interface SlotMap {
+     /** Directory-flow hole under the conversation empty-state picker (declared by the WorkspacePicker entry). */
+     'conversation.hero.workspace.directoryFlow': { kind: 'single'; scope: 'root'; owner: DirectoryFlowOwnerProps }
+     /** Directory-flow hole under the sidebar browsing region (declared by the WorkspaceBrowser entry). */
+     'sidebar.workspaces.directoryFlow': { kind: 'single'; scope: 'root'; owner: DirectoryFlowOwnerProps }
++    /** Ordered resource sections rendered for each expanded real Workspace. */
++    'sidebar.workspace.section': { kind: 'list'; scope: 'root'; owner: WorkspaceSectionOwnerProps }
+   }
+ }
+ 
+@@ -139,10 +167,13 @@ export type WorkspaceBrowserInjected = {
+   createWorkspace: (input: { path: string }) => Promise<WorkspaceView>
+ }
+ 
+-/** Full browser props: shell owner share + viewing store + injected actions + the locale seat. */
++/**
++ * Full browser props: shell owner share, viewing store, injected actions,
++ * locale seat, directory flow and per-Workspace resource sections.
++ */
+ export type WorkspaceBrowserProps =
+   PropsRuntime<'sidebar.workspaces'>
+-  & PropsRenderSlots<'sidebar.workspaces.directoryFlow'>
++  & PropsRenderSlots<'sidebar.workspaces.directoryFlow' | 'sidebar.workspace.section'>
+   & PropsStore<ReturnType<typeof createWorkspaceViewStore>>
+   & Omit<WorkspaceBrowserInjected, 'hooks'>
+   & PropsHooks<WorkspaceBrowserInjected['hooks']>
+diff --git a/packages/client/ui-workspace/src/client/index.ts b/packages/client/ui-workspace/src/client/index.ts
+index f2d1d4033607a6973f90ebeffa30979f1df2b0fd..b579e3ee8ec5a86030f799628fe806e553407738 100644
+--- a/packages/client/ui-workspace/src/client/index.ts
++++ b/packages/client/ui-workspace/src/client/index.ts
+@@ -5,8 +5,10 @@
+  * (`conversation.hero.workspace` — both hero forms). Both read real Host
+  * Workspaces through the global useWorkspaces hook, and each declares its
+  * own `single` directory-flow child hole for the composed picker package's
+- * client half (see the contract module doc). Export discipline:
+- * packages/client/AGENTS.md.
++ * client half (see the contract module doc). WorkspaceBrowser also declares
++ * the ordered `sidebar.workspace.section` child hole: contributed resources
++ * render beside the built-in Sessions section inside each expanded real
++ * Workspace. Export discipline: packages/client/AGENTS.md.
+  */
+ import type { Context } from '@deepseek-ai/cordis'
+ import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
+@@ -33,6 +35,7 @@ export type { UiWorkspace } from './navigation.ts'
+ export type {
+   DirectoryFlowOwnerProps, DirectoryFlowSlotName, DirectoryPickingHooks, DirectoryPickingInjected,
+   WorkspaceBrowserInjected, WorkspaceBrowserProps, WorkspacePickerInjected, WorkspacePickerProps,
++  WorkspaceSectionOwnerProps,
+ } from './contract/slots.ts'
+ export type { WorkspaceKey } from './locales.ts'
+ 
+@@ -131,12 +134,15 @@ export function apply(ctx: Context): void {
+     createWorkspace: input => workspaces.create(input),
+     hooks: { directoryFlow: pickerFlowSource },
+   })
+-  // Each registration declares its directory-flow child in the same call;
+-  // slot injection follows both the owner and declaration HMR lifetimes.
++  // Each registration declares its child holes in the same call; slot
++  // injection follows both the owner and declaration HMR lifetimes.
+   ctx.slots.inject('sidebar.workspaces', () => ctx.slots.register(
+     {
+       name: 'sidebar.workspaces',
+-      children: { 'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' } },
++      children: {
++        'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' },
++        'sidebar.workspace.section': { kind: 'list', scope: 'root' },
++      },
+       store: createWorkspaceViewStore(),
+       inject: browserInjected,
+       locale: NS,
+diff --git a/packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.module.css b/packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.module.css
+index dd9ee488bfb9433c4292c7f2a2ae222257182a16..186ae12f12cb499c3a82994a2fbf4bfb5fb1d5fa 100644
+--- a/packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.module.css
++++ b/packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.module.css
+@@ -373,6 +373,27 @@
+   margin-top: 4px;
+ }
+ 
++/* Resource headings make Sessions and contributed sections peers without
++   letting an occupant own or replace the Workspace/session tree. */
++.resourceHeading {
++  box-sizing: border-box;
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  min-height: 24px;
++  padding: 2px 10px 0 28px;
++  color: var(--dsw-alias-label-tertiary);
++  font-size: 11px;
++  font-weight: 600;
++  letter-spacing: .02em;
++}
++
++.resourceCount {
++  min-width: 18px;
++  text-align: right;
++  font-variant-numeric: tabular-nums;
++}
++
+ .listTopDropIndicator,
+ .workspaceDropBefore::before,
+ .workspaceDropAfter::after {
+diff --git a/packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx b/packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx
+index c8a5a157405447043898cef2e9ec02950dc590b8..7f8cb9eea88f3e65adc044a2b759b37734a4e032 100644
+--- a/packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx
++++ b/packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx
+@@ -2,14 +2,17 @@
+  * The workspace/session browsing region filling the sidebar shell's
+  * `sidebar.workspaces` hole: section header (title + view options + add
+  * workspace), search, the grouped tree or flat list, and the workspace
+- * dialogs. Wide state renders the full browser; rail state renders the two
++ * dialogs plus contributed sibling resource sections for each real Workspace.
++ * Wide state renders the full browser; rail state renders the two
+  * region icons (search / add workspace) as 36px controls on the shell's shared
+  * rail entry path, each requesting expansion through the owner share. Adding
+  * is the header button's one action, so it raises the directory flow with no
+  * menu in between; the flow and its error dialog live in WorkspacePicker
+- * (same package — direct composition, no slot between them).
++ * (same package — direct composition, no slot between them). Resource
++ * occupants receive owner facts/actions but never own Workspace navigation.
+  */
+ import { useEffect, useMemo, useRef, useState } from 'react'
++import type { ReactNode } from 'react'
+ import clsx from 'clsx'
+ import {
+   Button, IconCloseFill14, IconPersonalizationOutline16,
+@@ -20,7 +23,7 @@ import type {
+ } from '@deepseek-ai/dsh-api-session-controller/client'
+ import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
+ import type { SessionId } from '@deepseek-ai/dsh-session/types'
+-import type { WorkspaceBrowserProps } from '../contract/slots.ts'
++import type { WorkspaceBrowserProps, WorkspaceSectionOwnerProps } from '../contract/slots.ts'
+ import type { SessionNode, SessionOrderBy } from '../tree.ts'
+ import { deriveFlat, deriveGroups, deriveSearchResults, UNGROUPED_KEY } from '../tree.ts'
+ import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './Rows.tsx'
+@@ -262,6 +265,8 @@ type SessionTreeProps = Pick<
+   onSessionArchive: (sessionId: SessionNode['id']) => void
+   /** Session order behavior: fixed after edits, or additionally promoted by user activity. */
+   orderBy: SessionOrderBy
++  /** Render all plugin-owned resource sections for one expanded real Workspace. */
++  renderWorkspaceSections: (owner: WorkspaceSectionOwnerProps) => ReactNode
+ }
+ 
+ /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
+@@ -271,6 +276,7 @@ function SessionTree({
+   insertWorkspaceBefore, insertSessionBefore, orderBy,
+   groupExpansion, setGroupExpanded,
+   sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, t,
++  renderWorkspaceSections,
+ }: SessionTreeProps) {
+   const list = useSessions(s => s)
+   const pendingInteractions = useSessionPendingInteraction(s => s)
+@@ -438,6 +444,9 @@ function SessionTree({
+         )}
+         {groups.map((group) => {
+           const workspaceId = group.workspaceId
++          const workspace = workspaceId === undefined
++            ? undefined
++            : orderedWorkspaces.find(candidate => candidate.workspaceId === workspaceId)
+           const collapsed = collapsedSessionRows(group.sessions)
+           const sessionsExpanded = expandedSessionGroups.includes(group.key)
+           const workspaceMarker = workspaceId !== undefined && workspaceDrag?.over?.id === workspaceId
+@@ -525,6 +534,12 @@ function SessionTree({
+                     },
+                   }}
+               />
++              {group.expanded && (
++                <div className={css.resourceHeading} role="heading" aria-level={3}>
++                  <span>{t('section.sessions')}</span>
++                  <span className={css.resourceCount}>{String(group.sessions.length)}</span>
++                </div>
++              )}
+               {(sessionsExpanded
+                 ? group.sessions
+                 : collapsed.rows
+@@ -581,6 +596,13 @@ function SessionTree({
+                     : t('sessions.expand', { n: collapsed.hiddenCount })}
+                 </button>
+               )}
++              {group.expanded && workspace !== undefined && renderWorkspaceSections({
++                workspaceId: workspace.workspaceId,
++                workspacePath: workspace.path,
++                workspaceTitle: workspace.title,
++                sessionIds: workspace.sessionIds,
++                activateWorkspace: () => { startSession(workspace.workspaceId) },
++              })}
+             </div>
+           )
+         })}
+@@ -1252,6 +1274,7 @@ export function WorkspaceBrowser({
+                 orderBy={orderBy}
+                 home={home}
+                 t={t}
++                renderWorkspaceSections={owner => renderSlot('sidebar.workspace.section', owner)}
+                 onRenameRequest={(workspaceId, currentTitle) => {
+                   setRenameTarget({ workspaceId, currentTitle })
+                   setRenameDraft(currentTitle)
+diff --git a/packages/client/ui-workspace/tests/apply.client.spec.ts b/packages/client/ui-workspace/tests/apply.client.spec.ts
+index 941c251f56787ac33f17391fa58f78eb24d646e9..33eec47637260eed285ac067dcbb2c7c8eb681fd 100644
+--- a/packages/client/ui-workspace/tests/apply.client.spec.ts
++++ b/packages/client/ui-workspace/tests/apply.client.spec.ts
+@@ -151,13 +151,14 @@ describe('ui-workspace apply', () => {
+     expect(b.create).toHaveBeenCalledWith({ path: '/tmp/project' })
+   })
+ 
+-  it('declares the two directory-flow holes and reports their occupancy per surface', async () => {
++  it('declares directory-flow holes plus the per-Workspace resource-section list', async () => {
+     const b = await bench()
+     declare(b.slots, 'sidebar.workspaces', 'conversation.hero.workspace')
+     await b.ctx.plugin({ inject: [...inject], apply }).await()
+     // Registration declared the child holes (declaration = render authorization).
+     expect(b.slots.spec('sidebar.workspaces.directoryFlow')).toMatchObject({ kind: 'single' })
+     expect(b.slots.spec('conversation.hero.workspace.directoryFlow')).toMatchObject({ kind: 'single' })
++    expect(b.slots.spec('sidebar.workspace.section')).toMatchObject({ kind: 'list', scope: 'root' })
+ 
+     const browser = (b.slots.entries('sidebar.workspaces')[0]!.inject as () => WorkspaceBrowserInjected)()
+     const picker = (b.slots.entries('conversation.hero.workspace')[0]!.inject as () => WorkspacePickerInjected)()
+diff --git a/packages/client/ui-workspace/tests/browser-styles.client.spec.ts b/packages/client/ui-workspace/tests/browser-styles.client.spec.ts
+index 3d0f31b318b8301e4b766891c2ac0f6b13030cfd..8efe512b1e49fa509d35b5c236de1b607992ba80 100644
+--- a/packages/client/ui-workspace/tests/browser-styles.client.spec.ts
++++ b/packages/client/ui-workspace/tests/browser-styles.client.spec.ts
+@@ -76,6 +76,14 @@ describe('WorkspaceBrowser.module.css list', () => {
+     expect(declarations('.groupSection + .groupSection')?.get('margin-top')).toBe('4px')
+   })
+ 
++  it('renders contributed resources under a compact Sessions peer heading', () => {
++    const heading = declarations('.resourceHeading')
++    expect(heading?.get('display')).toBe('flex')
++    expect(heading?.get('min-height')).toBe('24px')
++    expect(heading?.get('padding')).toBe('2px 10px 0 28px')
++    expect(declarations('.resourceCount')?.get('font-variant-numeric')).toBe('tabular-nums')
++  })
++
+   it('draws drag targets as a leading chevron joined to the insertion line', () => {
+     const listTopMarker = declarations('.listTopDropIndicator')
+     const workspaceMarker = declarations('.workspaceDropBefore::before')
+diff --git a/packages/client/ui-workspace/tests/workspace-browser.client.spec.tsx b/packages/client/ui-workspace/tests/workspace-browser.client.spec.tsx
+index 22e4062abef560da81e6c55684a63812c837de45..fd8bcda056cff400f79938d60285d3cd19a991cf 100644
+--- a/packages/client/ui-workspace/tests/workspace-browser.client.spec.tsx
++++ b/packages/client/ui-workspace/tests/workspace-browser.client.spec.tsx
+@@ -86,7 +86,12 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
+     createWorkspace: vi.fn(async () => workspace('created', [])),
+     useDirectoryFlow: bindSnapshotSelector({ getSnapshot: () => true, subscribe: () => () => {} }),
+     useConnectionGeneration: selector => selector(undefined),
+-    renderSlot: ((_name: string, owner: { open: boolean }) => (owner.open ? <div data-testid="directory-flow" /> : null)) as never,
++    renderSlot: ((name: string, owner: { open?: boolean }) => {
++      if (name === 'sidebar.workspace.section') {
++        return <div data-testid="workspace-section" />
++      }
++      return owner.open === true ? <div data-testid="directory-flow" /> : null
++    }) as never,
+     t,
+     ...overrides,
+   }
+@@ -251,6 +256,34 @@ describe('WorkspaceBrowser', () => {
+     expect(screen.queryByText('alpha-s')).toBeNull()
+   })
+ 
++  it('renders Sessions and contributed resource sections as siblings inside an expanded Workspace', () => {
++    const activateWorkspace = vi.fn()
++    let owner: Record<string, unknown> | undefined
++    mount({
++      useSessions: hook(sessionState([summary('alpha-s', 1)])),
++      useWorkspaces: hook(workspaceState([workspace('alpha', ['alpha-s'], 'Alpha')])),
++      renderSlot: ((name: string, value: Record<string, unknown>) => {
++        if (name !== 'sidebar.workspace.section') return null
++        owner = value
++        return <section aria-label="工作流">工作流</section>
++      }) as never,
++      startSession: activateWorkspace,
++    })
++
++    fireEvent.click(screen.getByText('Alpha'))
++    expect(screen.getByText('会话')).toBeTruthy()
++    expect(screen.getByRole('region', { name: '工作流' })).toBeTruthy()
++    expect(owner).toMatchObject({
++      workspaceId: wid('alpha'),
++      workspacePath: '/projects/alpha',
++      workspaceTitle: 'Alpha',
++      sessionIds: [sid('alpha-s')],
++    })
++    expect(typeof owner?.activateWorkspace).toBe('function')
++    ;(owner?.activateWorkspace as () => void)()
++    expect(activateWorkspace).toHaveBeenCalledWith(wid('alpha'))
++  })
++
+   it('shows five sessions by default and clears transient show-all when the Workspace collapses', () => {
+     const items = Array.from({ length: 7 }, (_, index) => summary(`session-${index + 1}`, 7 - index))
+     const b = mount({

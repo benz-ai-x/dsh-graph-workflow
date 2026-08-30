@@ -6,13 +6,16 @@ DeepSeek Harness 的可视化 DAG 工作流插件。它把可重复任务保存�
 
 ## 能力
 
-- 在“设置 → 工作流”中创建、修改和删除 DAG，并用画布查看依赖关系。
-- 节点支持 `prompt`、可选 `skill`、可选 `provider/model` 和 `minChars`、`mustInclude`、`forbidden` 验收规则。
+- 每个 Workspace 展开后都以同级资源显示“会话”和“工作流”；工作流不进入全局“设置”。
+- 工作流中心用于搜索、创建和选择资产；进入后使用三栏编排器配置 DAG；画布支持节点拖拽、端口连线、边删除、自动布局、MiniMap、撤销/重做和键盘操作。
+- 输入支持单行、多行、数字、布尔和枚举类型；节点支持 `prompt`、可选 `skill`、可选 `provider/model` 和 `minChars`、`mustInclude`、`forbidden` 验收规则，Skill/模型选择器来自当前 Agent 的实时能力目录，也允许手动填写自定义值。
 - 同一层无依赖节点并行执行；下游只在所有依赖节点验收通过后启动。
-- `list_graph_workflows` 向模型公开可用流程及其结构化输入。
-- `run_graph_workflow` 使用当前 `exec.agent` 执行流程，返回可直接交付的最终节点内容。
+- 草稿保存会创建不可变版本；用户可比较版本、发布任意保留版本，或把历史版本恢复为新的头版本。普通模型运行默认只使用已发布版本，测试台显式锁定正在编辑的保存版本。
+- `list_graph_workflows` 只向模型公开已发布流程及其结构化输入；`run_graph_workflow` 使用当前 `exec.agent` 执行已发布版本，也可显式锁定不可变版本，返回可直接交付的最终节点内容。
 - 浏览器运行在返回 receipt 后转为服务所有；界面轮询展示 queued/running/succeeded/failed/cancelled/skipped，并可取消运行。
-- 工作流定义通过版本号 CAS 和原子 JSON 文件持久化；运行快照只保留在当前 Host 进程内。
+- 测试台支持完整流程或“目标节点 + 全部祖先”的隔离运行，并可保存、复用和删除回归输入集。
+- 工作流定义按稳定 Workspace ID 隔离，通过版本号 CAS 和原子 JSON 文件持久化；多窗口保存冲突不会覆盖本地草稿，可载入远端版本或另存副本。同名 ID 可存在于不同 Workspace。
+- 已结束运行在对外呈现 settled 状态前持久化不可变 definition snapshot、逐节点输出和逐条验收证据；Host 重启后仍可查看并复用输入。运行中的状态保持实时更新。
 
 ## 工作流格式
 
@@ -32,13 +35,13 @@ Skill 由当前 Agent 作用域下的 `ctx.skills` 加载，并且必须允许�
 项目锁定 DeepSeek Harness `0.1.2-alpha.1`、commit `cd5ef8148158c3a752a658978873241fdf8e2bbc`，Node 要求为 `^22.19.0 || >=24.0.0`。
 
 ```sh
-pnpm install
+pnpm context:sync
 pnpm verify
 ```
 
-`pnpm verify` 会校验 Harness commit、文档摘要、干净源码和全部 source links，然后构建 Host/Client/Typert 产物，运行领域、存储、执行器、取消/生命周期、Tool/HMR、真实 Loader、Remote 挂载和 UI 测试，最后检查公共导出与实际 `.tgz` 文件清单。
+`pnpm context:sync` 会把锁定的 Workspace resource Slot 补丁应用到对应 Harness checkout、重建受影响的 Client 包、同步 source links 并安装依赖。`pnpm verify` 会校验 Harness commit、文档摘要、补丁 SHA-256、补丁之外零漂移和全部 source links，然后构建 Host/Client/Typert 产物，运行领域、存储、执行器、取消/生命周期、Tool/HMR、真实 Loader、Remote 挂载和 UI 测试，最后检查公共导出与实际 `.tgz` 文件清单。
 
-如果 Harness checkout 移动，需要同步两个 workspace manifest 中的链接并刷新 lockfile：
+如果 Harness checkout 移动或重新拉取为干净 checkout，需要重新应用已审计补丁、同步两个 manifest 中的链接并刷新 lockfile：
 
 ```sh
 DSH_HARNESS_ROOT=/new/path/to/deepseek-harness pnpm context:sync
@@ -50,19 +53,19 @@ DSH_HARNESS_ROOT=/new/path/to/deepseek-harness pnpm context:sync
 
 ```sh
 pnpm build
-dsh plugin --profile demo add ./packages/graph-workflow
-dsh --profile demo --dump-config
-dsh --profile demo
+dsh plugin --profile web add ./packages/graph-workflow
+dsh --profile web --dump-config
+dsh web
 ```
 
 卸载命令：
 
 ```sh
-dsh plugin --profile demo remove dsh-graph-workflow
+dsh plugin --profile web remove dsh-graph-workflow
 ```
 
-插件通过 [cordis.patch.yml](packages/graph-workflow/cordis.patch.yml) 注入稳定 row `graph-workflow`。完整配置说明见[插件包 README](packages/graph-workflow/README.md)。
+插件通过 [cordis.patch.yml](packages/graph-workflow/cordis.patch.yml) 注入稳定 row `graph-workflow`。它面向带 Workspace 与浏览器 UI 的 `web` Profile；工作流引擎按当前 Agent preset 解析，因此不要把它安装到只有 `dsh-base` 的自定义 Profile。完整配置说明见[插件包 README](packages/graph-workflow/README.md)。
 
 ## 交付边界
 
-当前插件是针对上述固定 Harness 源码快照验证的 source-linked 交付，包保持 `private: true`。已验证本地构建、Loader 组合和 tarball 内容，但没有改动用户的 DSH profile，也不宣称当前依赖闭包已具备独立 npm 发布条件。
+当前插件是针对上述固定 Harness 源码快照验证的 source-linked 交付，包保持 `private: true`。已使用隔离的开发 Profile 验证安装与启动，并验证本地构建、Loader 组合和 tarball 内容；不宣称当前依赖闭包已具备独立 npm 发布条件。

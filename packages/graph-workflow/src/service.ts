@@ -1,9 +1,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-llm'
+import { isModelInvocable } from '@deepseek-ai/dsh-skill'
+import type {} from '@deepseek-ai/dsh-workspace'
 import { Remote, TypertRemoteFailure, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import type { WorkflowRun } from '@deepseek-ai/dsh-workflow'
 import type { WorkflowAgentEndInfo, WorkflowAgentInfo, WorkflowResult, WorkflowRunInfo } from '@deepseek-ai/dsh-workflow/types'
 import type {
   CancelGraphWorkflowRunRequest,
+  GraphWorkflowCapabilityCatalog,
   GraphWorkflowCatalog,
   GraphWorkflowDefinition,
   GraphWorkflowExecutionResult,
@@ -12,19 +17,31 @@ import type {
   GraphWorkflowRunCatalog,
   GraphWorkflowRunReceipt,
   GraphWorkflowRunSnapshot,
+  GraphWorkflowTestCase,
+  GraphWorkflowTestCaseCatalog,
+  GraphWorkflowTestCasesRequest,
+  GraphWorkflowVersionCatalog,
+  GraphWorkflowVersionsRequest,
+  GraphWorkflowWorkspaceRequest,
+  PublishGraphWorkflowRequest,
+  RemoveGraphWorkflowTestCaseRequest,
   RemoveGraphWorkflowRequest,
+  RestoreGraphWorkflowRequest,
+  SaveGraphWorkflowTestCaseRequest,
   SaveGraphWorkflowRequest,
   StartGraphWorkflowRequest,
 } from './domain.ts'
 import { deepFreeze, normalizeRunInput } from './domain.ts'
+import { XIAOHONGSHU_WORKFLOW } from './domain.ts'
 import {
   decodeGraphWorkflowProgramResult,
   graphWorkflowStartRequest,
   prepareGraphWorkflowArguments,
   type GraphWorkflowProgramResult,
+  type GraphWorkflowProgramOutput,
 } from './executor.ts'
 import { GraphWorkflowError, throwIfAborted } from './errors.ts'
-import type { GraphWorkflowStore } from './store.ts'
+import { seedWorkflow, type GraphWorkflowStore } from './store.ts'
 
 /** Service limits resolved from deployment configuration. */
 export interface GraphWorkflowServiceLimits {
@@ -33,21 +50,22 @@ export interface GraphWorkflowServiceLimits {
   readonly maxResultChars: number
   readonly maxActiveRunsPerAgent: number
   readonly retainedRuns: number
+  readonly seedExample: boolean
 }
 
 interface OwnedRun {
   readonly owner: Agent
   readonly workflow: GraphWorkflowDefinition
   readonly controller: AbortController
-  readonly handle: ReturnType<Context['workflowEngine']['start']>
+  readonly handle: WorkflowRun
   snapshot: GraphWorkflowRunSnapshot
   settled: Promise<void>
   removeCallerAbort?: () => void
 }
 
-/** Host truth for saved definitions and process-local observable DAG runs. */
+/** Host truth for durable workflow assets/history and live in-flight DAG runs. */
 export class GraphWorkflowService extends TypertRemoteService {
-  static inject = ['agents', 'skills', 'workflowEngine']
+  static inject = ['agents', 'skills', 'llm', 'workspaceRegistry']
 
   private readonly runsById = new Map<string, OwnedRun>()
   private readonly ownerCleanups = new Map<Agent, () => unknown>()
@@ -64,10 +82,70 @@ export class GraphWorkflowService extends TypertRemoteService {
     ctx.effect(() => async () => { await this.shutdown() }, 'graph-workflows.shutdown')
   }
 
-  /** Read the immutable saved-definition catalog. */
+  /** Read the immutable saved-definition catalog for one exact Host Workspace. */
   @Remote('catalog')
-  catalog(): GraphWorkflowCatalog {
-    return this.store.catalog()
+  async catalog(request: GraphWorkflowWorkspaceRequest): Promise<GraphWorkflowCatalog> {
+    try {
+      this.assertAdmitting()
+      const owner = this.workspaceIdFromRequest(request)
+      return await this.workspaceCatalog(owner)
+    } catch (error) {
+      throwRemoteFailure(error)
+    }
+  }
+
+  /** Read the calling Agent's Workspace catalog for the model-facing tool. */
+  async catalogForAgent(agent: Agent): Promise<GraphWorkflowCatalog> {
+    this.assertAdmitting()
+    this.assertLive(agent)
+    const owner = this.workspaceIdForAgent(agent)
+    await this.workspaceCatalog(owner)
+    return this.store.publishedCatalog(owner)
+  }
+
+  /** Read immutable revision history for one Workspace workflow. */
+  @Remote('versions')
+  async versions(request: GraphWorkflowVersionsRequest): Promise<GraphWorkflowVersionCatalog> {
+    try {
+      this.assertAdmitting()
+      const owner = this.workspaceIdFromRequest(request)
+      await this.workspaceCatalog(owner)
+      return this.store.versions(owner, request.workflowId)
+    } catch (error) {
+      throwRemoteFailure(error)
+    }
+  }
+
+  /** Resolve advisory Skill and LLM selector choices for the exact live Agent. */
+  @Remote('capabilities')
+  async capabilities(agent: Agent): Promise<GraphWorkflowCapabilityCatalog> {
+    try {
+      this.assertAdmitting()
+      this.assertLive(agent)
+      const skills = (await this.ctx.skills.list({
+        ...(agent.session.header.cwd === undefined ? {} : { cwd: agent.session.header.cwd }),
+        scope: agent,
+      })).filter(isModelInvocable).slice(0, 500).map(skill => ({
+        name: skill.name,
+        description: skill.description,
+        source: skill.source,
+      }))
+      const providers = await Promise.all(this.ctx.llm.listProviders().slice(0, 100).map(async provider => {
+        const models = await this.ctx.llm.listModels(provider.id).catch(() => [])
+        return {
+          id: provider.id,
+          name: provider.name,
+          models: models.slice(0, 500).map(model => ({
+            id: model.id,
+            name: model.name,
+            ...(model.description === undefined ? {} : { description: model.description }),
+          })),
+        }
+      }))
+      return deepFreeze({ skills, providers })
+    } catch (error) {
+      throwRemoteFailure(error)
+    }
   }
 
   /** Compare-and-set a complete definition from one exact live Agent. */
@@ -76,25 +154,90 @@ export class GraphWorkflowService extends TypertRemoteService {
     try {
       this.assertAdmitting()
       this.assertLive(agent)
-      return await this.store.save(request)
+      const owner = this.workspaceIdForAgent(agent)
+      await this.store.adoptLegacy(owner)
+      return await this.store.save(owner, request)
+    } catch (error) {
+      throwRemoteFailure(error)
+    }
+  }
+
+  /** Make one retained revision the production default. */
+  @Remote('publish')
+  async publish(agent: Agent, request: PublishGraphWorkflowRequest): Promise<GraphWorkflowDefinition> {
+    try {
+      this.assertAdmitting()
+      this.assertLive(agent)
+      return await this.store.publish(this.workspaceIdForAgent(agent), request)
+    } catch (error) {
+      throwRemoteFailure(error)
+    }
+  }
+
+  /** Copy historical content into a new head revision. */
+  @Remote('restore')
+  async restore(agent: Agent, request: RestoreGraphWorkflowRequest): Promise<GraphWorkflowDefinition> {
+    try {
+      this.assertAdmitting()
+      this.assertLive(agent)
+      return await this.store.restore(this.workspaceIdForAgent(agent), request)
+    } catch (error) {
+      throwRemoteFailure(error)
+    }
+  }
+
+  @Remote('testCases')
+  testCases(agent: Agent, request: GraphWorkflowTestCasesRequest): GraphWorkflowTestCaseCatalog {
+    try {
+      this.assertAdmitting()
+      this.assertLive(agent)
+      const owner = this.workspaceIdForAgent(agent)
+      if (this.store.get(owner, request.workflowId) === undefined) {
+        throw new GraphWorkflowError(`workflow "${request.workflowId}" was not found`, 'GRAPH_WORKFLOW_NOT_FOUND')
+      }
+      return this.store.testCases(owner, request.workflowId)
+    } catch (error) {
+      throwRemoteFailure(error)
+    }
+  }
+
+  @Remote('saveTestCase')
+  async saveTestCase(agent: Agent, request: SaveGraphWorkflowTestCaseRequest): Promise<GraphWorkflowTestCase> {
+    try {
+      this.assertAdmitting()
+      this.assertLive(agent)
+      return await this.store.saveTestCase(this.workspaceIdForAgent(agent), request.workflowId, request.testCase)
+    } catch (error) {
+      throwRemoteFailure(error)
+    }
+  }
+
+  @Remote('deleteTestCase')
+  async deleteTestCase(agent: Agent, request: RemoveGraphWorkflowTestCaseRequest): Promise<GraphWorkflowTestCase> {
+    try {
+      this.assertAdmitting()
+      this.assertLive(agent)
+      return await this.store.removeTestCase(this.workspaceIdForAgent(agent), request.workflowId, request.testCaseId)
     } catch (error) {
       throwRemoteFailure(error)
     }
   }
 
   /** Compare-and-set removal of one definition from one exact live Agent. */
-  @Remote('remove')
-  async remove(agent: Agent, request: RemoveGraphWorkflowRequest): Promise<GraphWorkflowDefinition> {
+  @Remote('deleteWorkflow')
+  async deleteWorkflow(agent: Agent, request: RemoveGraphWorkflowRequest): Promise<GraphWorkflowDefinition> {
     try {
       this.assertAdmitting()
       this.assertLive(agent)
-      if ([...this.runsById.values()].some(run => run.workflow.id === request.workflowId && !isSettled(run.snapshot))) {
+      const owner = this.workspaceIdForAgent(agent)
+      if ([...this.runsById.values()].some(run => run.workflow.workspaceId === owner
+        && run.workflow.id === request.workflowId && !isSettled(run.snapshot))) {
         throw new GraphWorkflowError(
           `workflow "${request.workflowId}" has an active run`,
           'GRAPH_WORKFLOW_BUSY',
         )
       }
-      return await this.store.remove(request)
+      return await this.store.remove(owner, request)
     } catch (error) {
       throwRemoteFailure(error)
     }
@@ -111,6 +254,7 @@ export class GraphWorkflowService extends TypertRemoteService {
       const run = await this.launch(agent, request, signal, false)
       return deepFreeze({
         runId: run.snapshot.runId,
+        workspaceId: run.workflow.workspaceId,
         workflowId: run.workflow.id,
         workflowRevision: run.workflow.revision,
       })
@@ -136,21 +280,25 @@ export class GraphWorkflowService extends TypertRemoteService {
     }
     return deepFreeze({
       runId: snapshot.runId,
+      workspaceId: snapshot.workspaceId,
       workflowId: snapshot.workflowId,
       workflowRevision: snapshot.workflowRevision,
       deliverable: snapshot.deliverable,
     })
   }
 
-  /** List retained runs belonging to the exact current Agent lifecycle. */
+  /** List live Agent runs plus durable settled history for its Workspace. */
   @Remote('runs')
   runs(agent: Agent): GraphWorkflowRunCatalog {
     try {
       this.assertLive(agent)
+      const owner = this.workspaceIdForAgent(agent)
+      const live = [...this.runsById.values()]
+        .filter(run => run.owner === agent)
+        .map(run => run.snapshot)
+      const liveIds = new Set(live.map(run => run.runId))
       return deepFreeze({
-        runs: [...this.runsById.values()]
-          .filter(run => run.owner === agent)
-          .map(run => run.snapshot)
+        runs: [...live, ...this.store.runs(owner).filter(run => !liveIds.has(run.runId))]
           .sort((left, right) => right.createdAt - left.createdAt),
       })
     } catch (error) {
@@ -189,10 +337,10 @@ export class GraphWorkflowService extends TypertRemoteService {
         'GRAPH_WORKFLOW_BUSY',
       )
     }
-    const workflow = this.store.get(request.workflowId)
-    if (workflow === undefined) {
-      throw new GraphWorkflowError(`workflow "${request.workflowId}" was not found`, 'GRAPH_WORKFLOW_NOT_FOUND')
-    }
+    const owner = this.workspaceIdForAgent(agent)
+    await this.workspaceCatalog(owner)
+    const savedWorkflow = this.store.executionDefinition(owner, request.workflowId, request.workflowRevision)
+    const workflow = executionScope(savedWorkflow, request.targetNodeId)
     const input = normalizeRunInput(workflow, request.input, this.limits.maxInputChars)
     const args = await prepareGraphWorkflowArguments(
       this.ctx.skills,
@@ -215,9 +363,16 @@ export class GraphWorkflowService extends TypertRemoteService {
       )
     }
     this.ensureOwnerCleanup(agent)
+    const engine = agent.ctx.get('workflowEngine')
+    if (engine === undefined) {
+      throw new GraphWorkflowError(
+        `agent "${agent.id}" does not have an active workflow engine`,
+        'GRAPH_WORKFLOW_EXECUTION_FAILED',
+      )
+    }
     const controller = new AbortController()
     let removeCallerAbort: (() => void) | undefined
-    let publishedHandle: ReturnType<Context['workflowEngine']['start']> | undefined
+    let publishedHandle: WorkflowRun | undefined
     if (bridgeCaller) {
       const abort = (): void => {
         controller.abort(callerSignal.reason)
@@ -226,9 +381,9 @@ export class GraphWorkflowService extends TypertRemoteService {
       callerSignal.addEventListener('abort', abort, { once: true })
       removeCallerAbort = () => { callerSignal.removeEventListener('abort', abort) }
     }
-    let handle: ReturnType<Context['workflowEngine']['start']>
+    let handle: WorkflowRun
     try {
-      handle = this.ctx.workflowEngine.start(graphWorkflowStartRequest(workflow, args, agent, controller.signal))
+      handle = engine.start(graphWorkflowStartRequest(workflow, args, agent, controller.signal))
       publishedHandle = handle
     } catch (error) {
       removeCallerAbort?.()
@@ -243,6 +398,7 @@ export class GraphWorkflowService extends TypertRemoteService {
       handle,
       snapshot: deepFreeze({
         runId: String(handle.id),
+        workspaceId: workflow.workspaceId,
         workflowId: workflow.id,
         workflowName: workflow.name,
         workflowRevision: workflow.revision,
@@ -251,12 +407,15 @@ export class GraphWorkflowService extends TypertRemoteService {
         createdAt: now,
         startedAt: now,
         input,
+        workflow,
         nodes: workflow.nodes.map(node => ({ nodeId: node.id, name: node.name, status: 'queued' })),
+        ...(request.targetNodeId === undefined ? {} : { targetNodeId: request.targetNodeId }),
       }),
       settled: Promise.resolve(),
       ...(removeCallerAbort === undefined ? {} : { removeCallerAbort }),
     }
-    if (this.runsById.has(record.snapshot.runId)) {
+    if (this.runsById.has(record.snapshot.runId)
+      || this.store.runs(workflow.workspaceId).some(run => run.runId === record.snapshot.runId)) {
       handle.cancel('duplicate workflow run id')
       void handle.dispose()
       removeCallerAbort?.()
@@ -307,24 +466,25 @@ export class GraphWorkflowService extends TypertRemoteService {
       }
       run.removeCallerAbort?.()
     }
+    const liveSnapshot = run.snapshot
     if (disposalError !== undefined) {
       this.failRun(run, boundedFailure('GRAPH_WORKFLOW_EXECUTION_FAILED', errorMessage(disposalError)))
-      this.prune(run.owner)
+      await this.archive(run, liveSnapshot)
       return
     }
     if (result === undefined) {
       this.failRun(run, boundedFailure('GRAPH_WORKFLOW_RESULT_INVALID', 'workflow engine settled without a result'))
-      this.prune(run.owner)
+      await this.archive(run, liveSnapshot)
       return
     }
     if (result.stopReason === 'cancelled') {
       this.cancelledRun(run, boundedFailure('GRAPH_WORKFLOW_ABORTED', result.error ?? 'workflow run was cancelled'))
-      this.prune(run.owner)
+      await this.archive(run, liveSnapshot)
       return
     }
     if (result.stopReason !== 'completed') {
       this.failRun(run, boundedFailure('GRAPH_WORKFLOW_EXECUTION_FAILED', result.error ?? 'workflow engine failed'))
-      this.prune(run.owner)
+      await this.archive(run, liveSnapshot)
       return
     }
     try {
@@ -333,7 +493,7 @@ export class GraphWorkflowService extends TypertRemoteService {
       if (!decoded.ok) {
         this.failRun(run, boundedFailure(decoded.failure.code, decoded.failure.message, decoded.failure.nodeId), decoded.outputs)
       } else {
-        const outputByNode = new Map(decoded.outputs.map(output => [output.nodeId, output.value]))
+        const outputByNode = new Map(decoded.outputs.map(output => [output.nodeId, output]))
         run.snapshot = deepFreeze({
           ...run.snapshot,
           revision: run.snapshot.revision + 1,
@@ -345,7 +505,8 @@ export class GraphWorkflowService extends TypertRemoteService {
             status: 'succeeded',
             startedAt: node.startedAt ?? run.snapshot.startedAt ?? run.snapshot.createdAt,
             endedAt: node.endedAt ?? Date.now(),
-            output: outputByNode.get(node.nodeId) as string,
+            output: (outputByNode.get(node.nodeId) as GraphWorkflowProgramOutput).value,
+            evidence: (outputByNode.get(node.nodeId) as GraphWorkflowProgramOutput).evidence,
           })),
         })
       }
@@ -355,7 +516,7 @@ export class GraphWorkflowService extends TypertRemoteService {
         errorMessage(error),
       ))
     }
-    this.prune(run.owner)
+    await this.archive(run, liveSnapshot)
   }
 
   private validateDecoded(run: OwnedRun, result: GraphWorkflowProgramResult): void {
@@ -391,9 +552,9 @@ export class GraphWorkflowService extends TypertRemoteService {
   private failRun(
     run: OwnedRun,
     failure: GraphWorkflowFailure,
-    outputs: readonly { readonly nodeId: string; readonly value: string }[] = [],
+    outputs: readonly GraphWorkflowProgramOutput[] = [],
   ): void {
-    const outputByNode = new Map(outputs.map(output => [output.nodeId, output.value]))
+    const outputByNode = new Map(outputs.map(output => [output.nodeId, output]))
     run.snapshot = deepFreeze({
       ...run.snapshot,
       revision: run.snapshot.revision + 1,
@@ -402,10 +563,16 @@ export class GraphWorkflowService extends TypertRemoteService {
       error: failure,
       nodes: run.snapshot.nodes.map(node => {
         const output = outputByNode.get(node.nodeId)
-        if (output !== undefined) return { ...node, status: 'succeeded' as const, output, endedAt: node.endedAt ?? Date.now() }
         if (node.nodeId === failure.nodeId) {
-          return { ...node, status: 'failed' as const, endedAt: node.endedAt ?? Date.now(), error: failure }
+          return {
+            ...node,
+            status: 'failed' as const,
+            endedAt: node.endedAt ?? Date.now(),
+            error: failure,
+            ...(output === undefined ? {} : { output: output.value, evidence: output.evidence }),
+          }
         }
+        if (output !== undefined) return { ...node, status: 'succeeded' as const, output: output.value, evidence: output.evidence, endedAt: node.endedAt ?? Date.now() }
         if (node.status === 'running' || node.status === 'failed') {
           return { ...node, status: 'failed' as const, endedAt: node.endedAt ?? Date.now(), error: node.error ?? failure }
         }
@@ -427,6 +594,23 @@ export class GraphWorkflowService extends TypertRemoteService {
         endedAt: node.endedAt ?? Date.now(),
       })),
     })
+  }
+
+  /** A run is observable as settled only after its durable history commit succeeds. */
+  private async archive(run: OwnedRun, liveSnapshot: GraphWorkflowRunSnapshot): Promise<void> {
+    const settledSnapshot = run.snapshot
+    run.snapshot = liveSnapshot
+    try {
+      await this.store.recordRun(run.workflow.workspaceId, settledSnapshot, this.limits.retainedRuns)
+      run.snapshot = settledSnapshot
+    } catch (error) {
+      run.snapshot = settledSnapshot
+      this.failRun(run, boundedFailure(
+        error instanceof GraphWorkflowError ? error.code : 'GRAPH_WORKFLOW_STORE_WRITE_FAILED',
+        `workflow completed but its run history could not be persisted: ${errorMessage(error)}`,
+      ))
+    }
+    this.prune(run.owner)
   }
 
   private updateNode(
@@ -486,6 +670,39 @@ export class GraphWorkflowService extends TypertRemoteService {
     }
   }
 
+  private workspaceIdForAgent(agent: Agent): string {
+    const workspace = this.ctx.workspaceRegistry.list().find(candidate => candidate.sessionIds.includes(agent.id))
+    if (workspace === undefined) {
+      throw new GraphWorkflowError(
+        `agent "${agent.id}" is not attached to a Workspace`,
+        'GRAPH_WORKFLOW_WORKSPACE_NOT_FOUND',
+      )
+    }
+    return String(workspace.id)
+  }
+
+  private workspaceIdFromRequest(request: GraphWorkflowWorkspaceRequest): string {
+    if (request === null || typeof request !== 'object' || Array.isArray(request)
+      || typeof request.workspaceId !== 'string' || request.workspaceId.trim().length === 0) {
+      throw new GraphWorkflowError('workspaceId must be a non-empty string', 'GRAPH_WORKFLOW_WORKSPACE_NOT_FOUND')
+    }
+    const workspace = this.ctx.workspaceRegistry.list()
+      .find(candidate => String(candidate.id) === request.workspaceId)
+    if (workspace === undefined) {
+      throw new GraphWorkflowError(
+        `Workspace "${request.workspaceId}" was not found`,
+        'GRAPH_WORKFLOW_WORKSPACE_NOT_FOUND',
+      )
+    }
+    return String(workspace.id)
+  }
+
+  private async workspaceCatalog(owner: string): Promise<GraphWorkflowCatalog> {
+    await this.store.adoptLegacy(owner)
+    if (this.limits.seedExample) await seedWorkflow(this.store, owner, XIAOHONGSHU_WORKFLOW)
+    return this.store.catalog(owner)
+  }
+
   private async shutdown(): Promise<void> {
     if (!this.admissionOpen) return
     this.admissionOpen = false
@@ -516,6 +733,28 @@ function errorMessage(error: unknown): string {
 function boundedFailure(code: string, message: string, nodeId?: string): GraphWorkflowFailure {
   const bounded = message.length <= 1_000 ? message : `${message.slice(0, 997)}...`
   return deepFreeze({ code, message: bounded, ...(nodeId === undefined ? {} : { nodeId }) })
+}
+
+function executionScope(workflow: GraphWorkflowDefinition, targetNodeId: string | undefined): GraphWorkflowDefinition {
+  if (targetNodeId === undefined) return workflow
+  const byId = new Map(workflow.nodes.map(node => [node.id, node]))
+  if (!byId.has(targetNodeId)) {
+    throw new GraphWorkflowError(`workflow node "${targetNodeId}" was not found`, 'GRAPH_WORKFLOW_NOT_FOUND')
+  }
+  const included = new Set<string>([targetNodeId])
+  const visit = (nodeId: string): void => {
+    for (const dependency of byId.get(nodeId)?.dependsOn ?? []) {
+      if (included.has(dependency)) continue
+      included.add(dependency)
+      visit(dependency)
+    }
+  }
+  visit(targetNodeId)
+  return deepFreeze({
+    ...workflow,
+    nodes: workflow.nodes.filter(node => included.has(node.id)),
+    outputNode: targetNodeId,
+  })
 }
 
 function throwRemoteFailure(error: unknown): never {

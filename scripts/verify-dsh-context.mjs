@@ -19,13 +19,17 @@ const expectedLinks = Object.freeze({
   '@deepseek-ai/cordis-plugin-include': 'vendor/include',
   '@deepseek-ai/cordis-plugin-loader': 'vendor/loader',
   '@deepseek-ai/dsh-agent': 'packages/core/agent',
+  '@deepseek-ai/dsh-api-gateway': 'packages/api/gateway',
   '@deepseek-ai/dsh-api-remotes': 'packages/api/remotes',
   '@deepseek-ai/dsh-api-session-controller': 'packages/api/session-controller',
   '@deepseek-ai/dsh-client-locale': 'packages/client/locale',
   '@deepseek-ai/dsh-client-test-runtime': 'packages/test-support/client-runtime',
+  '@deepseek-ai/dsh-client-ui-primitives': 'packages/client/ui-primitives',
   '@deepseek-ai/dsh-client-ui-renderer': 'packages/client/ui-renderer',
-  '@deepseek-ai/dsh-client-ui-settings': 'packages/client/ui-settings',
+  '@deepseek-ai/dsh-client-ui-session': 'packages/client/ui-session',
+  '@deepseek-ai/dsh-client-ui-sidebar': 'packages/client/ui-sidebar',
   '@deepseek-ai/dsh-client-ui-slots': 'packages/client/ui-slots',
+  '@deepseek-ai/dsh-client-ui-workspace': 'packages/client/ui-workspace',
   '@deepseek-ai/dsh-llm': 'packages/llm/llm',
   '@deepseek-ai/dsh-session': 'packages/core/session',
   '@deepseek-ai/dsh-skill': 'packages/skill/skill',
@@ -33,7 +37,9 @@ const expectedLinks = Object.freeze({
   '@deepseek-ai/dsh-tools': 'packages/core/tools',
   '@deepseek-ai/dsh-typert-generator': 'packages/typert/generator',
   '@deepseek-ai/dsh-typert-protocol': 'packages/typert/protocol',
+  '@deepseek-ai/dsh-typert-registry': 'packages/typert/registry',
   '@deepseek-ai/dsh-workflow': 'packages/workflow/workflow',
+  '@deepseek-ai/dsh-workspace': 'packages/workspace/workspace',
 })
 const packageRoot = join(projectRoot, 'packages/graph-workflow')
 const packageManifestPath = join(packageRoot, 'package.json')
@@ -76,6 +82,50 @@ function gitHead(sourceRoot) {
     throw new Error(result.stderr.trim() || `git rev-parse failed for ${sourceRoot}`)
   }
   return result.stdout.trim()
+}
+
+function gitDiff(sourceRoot, paths) {
+  const result = spawnSync('git', [
+    '-C', sourceRoot, 'diff', '--binary', '--full-index', '--no-ext-diff', 'HEAD', '--', ...paths,
+  ], { encoding: 'utf8' })
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || `git diff failed for ${sourceRoot}`)
+  }
+  return result.stdout
+}
+
+function sha256(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+function applyOverlay(sourceRoot, patch) {
+  const checkResult = spawnSync('git', ['-C', sourceRoot, 'apply', '--check', '--whitespace=nowarn', '-'], {
+    encoding: 'utf8',
+    input: patch,
+  })
+  if (checkResult.status !== 0) {
+    throw new Error(checkResult.stderr.trim() || `overlay preflight failed for ${sourceRoot}`)
+  }
+  const result = spawnSync('git', ['-C', sourceRoot, 'apply', '--whitespace=nowarn', '-'], {
+    encoding: 'utf8',
+    input: patch,
+  })
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || `overlay apply failed for ${sourceRoot}`)
+  }
+}
+
+function rebuildOverlayPackage(sourceRoot) {
+  const commands = [
+    ['exec', 'tsc', '-b', 'packages/client/ui-workspace/tsconfig.json', '--force'],
+    ['--filter', '@deepseek-ai/dsh-client-ui-workspace', 'bundle'],
+  ]
+  for (const args of commands) {
+    const result = spawnSync('pnpm', ['--dir', sourceRoot, ...args], { stdio: 'inherit' })
+    if (result.status !== 0) {
+      throw new Error(`pnpm ${args.join(' ')} failed while rebuilding the Harness overlay`)
+    }
+  }
 }
 
 function harnessWorktreeChanges(sourceRoot) {
@@ -172,6 +222,7 @@ const requiredFiles = [
   'packages/graph-workflow/tests/plugin.spec.ts',
   'packages/graph-workflow/tests/loader.spec.ts',
   'packages/graph-workflow/tests/fixtures/cordis.yml',
+  'overlays/deepseek-harness/workspace-resource-slot.patch',
   'scripts/verify-built.mjs',
 ]
 for (const path of requiredFiles) {
@@ -227,11 +278,13 @@ if (packageManifest) {
 }
 
 if (lock) {
-  check(lock.schemaVersion === 1, 'reference lock schema is supported')
+  check(lock.schemaVersion === 2, 'reference lock schema is supported')
   check(/^[0-9a-f]{40}$/.test(lock.upstream?.commit ?? ''), 'reference lock has a full Git commit')
   check(/^[0-9a-f]{64}$/.test(lock.upstream?.docsDigest ?? ''), 'reference lock has a docs SHA-256')
   check(lock.upstream?.node === '^22.19.0 || >=24.0.0', 'reference lock records the pinned Node engine')
   check(nodeSatisfies(lock.upstream?.node), `Node ${process.version} satisfies ${lock.upstream?.node}`)
+  check(lock.overlay?.baseCommit === lock.upstream?.commit, 'Harness overlay is pinned to the audited base commit')
+  check(/^[0-9a-f]{64}$/.test(lock.overlay?.sha256 ?? ''), 'Harness overlay has a SHA-256')
 
   const environmentName = lock.localResolution?.environmentVariable ?? 'DSH_HARNESS_ROOT'
   const configuredRoot = explicitHarnessRoot || process.env[environmentName]
@@ -249,10 +302,52 @@ if (lock) {
       check(sourceManifest.engines?.node === lock.upstream.node, `DSH Node engine matches ${lock.upstream.node}`)
       check(gitHead(sourceRoot) === lock.upstream.commit, `DSH commit matches ${lock.upstream.commit}`)
       check(digestDocs(sourceRoot) === lock.upstream.docsDigest, 'DSH docs digest matches the audited baseline')
-      const dirty = harnessWorktreeChanges(sourceRoot)
-      check(dirty.length === 0, dirty.length === 0
-        ? 'DSH Harness attested source inputs are clean'
-        : `DSH Harness attested source inputs have changes:\n${dirty}`)
+
+      const overlayPath = resolve(projectRoot, lock.overlay?.patch ?? '')
+      const overlayPaths = Array.isArray(lock.overlay?.paths) ? lock.overlay.paths : []
+      const overlayFileIsValid = overlayPath.startsWith(`${projectRoot}${sep}`)
+        && existsSync(overlayPath)
+        && statSync(overlayPath).isFile()
+      check(
+        overlayFileIsValid,
+        'Harness overlay patch exists inside the plugin workspace',
+      )
+      const overlayPathsAreValid = overlayPaths.length > 0
+        && new Set(overlayPaths).size === overlayPaths.length
+        && overlayPaths.every(path => typeof path === 'string' && !path.startsWith('/') && !path.split('/').includes('..'))
+      check(
+        overlayPathsAreValid,
+        'Harness overlay declares bounded relative paths',
+      )
+
+      let overlayPatch = ''
+      if (overlayFileIsValid) {
+        overlayPatch = readFileSync(overlayPath, 'utf8')
+        check(sha256(overlayPath) === lock.overlay?.sha256, 'Harness overlay patch digest matches the lock')
+      }
+
+      let dirty = harnessWorktreeChanges(sourceRoot)
+      let appliedOverlay = false
+      if (syncLinks && dirty.length === 0 && overlayPatch.length > 0 && failures.length === 0) {
+        applyOverlay(sourceRoot, overlayPatch)
+        dirty = harnessWorktreeChanges(sourceRoot)
+        appliedOverlay = true
+        passes.push('applied the audited Workspace resource-slot overlay')
+      }
+
+      const expectedChanges = overlayPaths.map(path => ` M ${path}`).sort()
+      const actualChanges = dirty.length === 0 ? [] : dirty.split('\n').sort()
+      const exactStatus = JSON.stringify(actualChanges) === JSON.stringify(expectedChanges)
+      const exactDiff = overlayPathsAreValid && overlayPatch.length > 0
+        && gitDiff(sourceRoot, overlayPaths) === overlayPatch
+      check(exactStatus && exactDiff, exactStatus && exactDiff
+        ? 'DSH Harness changes exactly match the audited Workspace resource-slot overlay'
+        : `DSH Harness changes diverge from the audited overlay:\n${dirty || '(clean checkout; overlay not applied)'}`)
+
+      if (syncLinks && exactStatus && exactDiff && failures.length === 0) {
+        rebuildOverlayPackage(sourceRoot)
+        if (!appliedOverlay) passes.push('rebuilt the audited Harness overlay package')
+      }
       validateLinkedArtifacts(sourceRoot)
 
       if (syncLinks && failures.length === 0) {

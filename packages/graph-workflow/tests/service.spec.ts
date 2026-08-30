@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import LlmRuntime from '@deepseek-ai/dsh-llm'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { WorkflowEngine, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
@@ -118,24 +119,32 @@ async function setup() {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(LlmRuntime)
   await ctx.plugin(SkillRegistry)
-  await ctx.plugin(StubEngine)
+  const workspaceSessionIds: SessionId[] = []
+  ctx.provide('workspaceRegistry', {
+    list: () => [{ id: 'workspace-a', path: '/projects/a', title: 'A', sessionIds: workspaceSessionIds }],
+  } as never)
   const store = await GraphWorkflowStore.open(join(directory, 'workflows.json'), {
     maxWorkflows: 10,
     maxNodesPerWorkflow: 10,
     maxInputChars: 1_000,
     maxPromptChars: 2_000,
   })
-  await store.save({ workflow: draft, expectedRevision: 0 })
+  const saved = await store.save('workspace-a', { workflow: draft, expectedRevision: 0 })
+  await store.publish('workspace-a', { workflowId: saved.id, revision: saved.revision, expectedRevision: saved.revision })
   const service = new GraphWorkflowService(ctx, store, {
     maxInputChars: 1_000,
     maxSkillChars: 2_000,
     maxResultChars: 5_000,
     maxActiveRunsPerAgent: 2,
     retainedRuns: 5,
+    seedExample: false,
   })
   const owner = fakeAgent(ctx, `agent-${Math.random().toString(16).slice(2)}`)
-  return { ctx, service, engine: ctx.workflowEngine as StubEngine, ...owner }
+  await owner.agent.ctx.plugin(StubEngine)
+  workspaceSessionIds.push(owner.agent.id)
+  return { ctx, service, store, engine: owner.agent.ctx.get('workflowEngine') as StubEngine, ...owner }
 }
 
 function completedValue() {
@@ -167,6 +176,8 @@ describe('GraphWorkflowService', () => {
     engine.runs[0]?.settle(completedValue())
     await vi.waitFor(() => { expect(service.runs(agent).runs[0]?.status).toBe('succeeded') })
     expect(service.runs(agent).runs[0]).toMatchObject({
+      workspaceId: 'workspace-a',
+      workflow: { id: 'service-flow', workspaceId: 'workspace-a', revision: 1 },
       deliverable: 'publish ready',
       nodes: [
         { nodeId: 'draft', status: 'succeeded', output: 'first draft' },
@@ -174,6 +185,45 @@ describe('GraphWorkflowService', () => {
       ],
     })
     expect(engine.runs[0]?.disposeCalls).toBe(1)
+  })
+
+  it('defaults to the published revision while browser tests can pin an unpublished revision and one node', async () => {
+    const { service, store, engine, agent } = await setup()
+    const head = store.get('workspace-a', 'service-flow') as NonNullable<ReturnType<typeof store.get>>
+    const draftHead = await store.save('workspace-a', {
+      workflow: { ...draft, name: 'Draft revision two' },
+      expectedRevision: head.revision,
+    })
+
+    const production = await service.start(agent, { workflowId: 'service-flow', input: { brief: 'published' } }, new AbortController().signal)
+    expect(production.workflowRevision).toBe(1)
+    engine.runs[0]?.settle(completedValue())
+    await vi.waitFor(() => { expect(service.runs(agent).runs[0]?.status).toBe('succeeded') })
+
+    const nodeTest = await service.start(agent, {
+      workflowId: 'service-flow',
+      workflowRevision: draftHead.revision,
+      targetNodeId: 'draft',
+      input: { brief: 'draft test' },
+    }, new AbortController().signal)
+    expect(nodeTest.workflowRevision).toBe(2)
+    expect((engine.runs[1]?.request.args as { nodes: unknown[] }).nodes).toHaveLength(1)
+    expect(engine.runs[1]?.request.meta.phases).toHaveLength(1)
+  })
+
+  it('lists model-invocable skills as advisory editor capabilities', async () => {
+    const { service, ctx, agent } = await setup()
+    const dispose = ctx.skills.register({
+      name: 'brand-voice',
+      description: 'Approved brand voice',
+      source: 'runtime',
+      content: 'Use the voice.',
+    })
+    await expect(service.capabilities(agent)).resolves.toMatchObject({
+      skills: [expect.objectContaining({ name: 'brand-voice', description: 'Approved brand voice' })],
+      providers: [],
+    })
+    dispose()
   })
 
   it('transfers browser runs away from request cancellation after returning the receipt', async () => {
@@ -208,7 +258,9 @@ describe('GraphWorkflowService', () => {
     expect(disposed).toBe(false)
     gate.resolve()
     await pending
-    expect(service.runs(agent).runs).toEqual([])
+    expect(service.runs(agent).runs).toEqual([
+      expect.objectContaining({ runId: 'graph-run-1', status: 'cancelled' }),
+    ])
   })
 
   it('rejects an impostor Agent even when it reuses a live session id', async () => {

@@ -4,7 +4,9 @@ import { mountGraphWorkflowStudio } from './mount.ts'
 
 export { inject } from './mount.ts'
 export { GraphWorkflowStudio } from './GraphWorkflowStudio.tsx'
-export type { GraphWorkflowStudioInjected, GraphWorkflowStudioProps, UiResult } from './GraphWorkflowStudio.tsx'
+export { WorkspaceGraphWorkflowSection } from './WorkspaceGraphWorkflowSection.tsx'
+export type { GraphWorkflowInitialView, GraphWorkflowStudioInjected, GraphWorkflowStudioProps, UiResult } from './GraphWorkflowStudio.tsx'
+export type { WorkspaceGraphWorkflowSectionProps } from './WorkspaceGraphWorkflowSection.tsx'
 export type { GraphWorkflowLocaleKey } from './locales.ts'
 
 export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {

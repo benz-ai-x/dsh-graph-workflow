@@ -2,6 +2,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { isModelInvocable, renderSkillContent, type SkillRegistry } from '@deepseek-ai/dsh-skill'
 import type { WorkflowMeta, WorkflowRun, WorkflowStartRequest } from '@deepseek-ai/dsh-workflow'
 import type {
+  GraphWorkflowAcceptanceEvidence,
   GraphWorkflowDefinition,
   GraphWorkflowFailure,
   GraphWorkflowNode,
@@ -24,16 +25,22 @@ export interface PreparedGraphWorkflowArguments {
 }
 
 /** Structured value returned by the fixed workflow program. */
+export interface GraphWorkflowProgramOutput {
+  readonly nodeId: string
+  readonly value: string
+  readonly evidence: readonly GraphWorkflowAcceptanceEvidence[]
+}
+
 export type GraphWorkflowProgramResult =
   | {
       readonly ok: true
       readonly deliverable: string
-      readonly outputs: readonly { readonly nodeId: string; readonly value: string }[]
+      readonly outputs: readonly GraphWorkflowProgramOutput[]
     }
   | {
       readonly ok: false
       readonly failure: GraphWorkflowFailure
-      readonly outputs: readonly { readonly nodeId: string; readonly value: string }[]
+      readonly outputs: readonly GraphWorkflowProgramOutput[]
     }
 
 /**
@@ -80,19 +87,33 @@ function buildPrompt(node) {
 }
 
 function check(node, value) {
-  if (typeof value !== 'string') return 'node returned a non-text result'
+  const evidence = []
   const acceptance = node.acceptance
-  if (!acceptance) return undefined
-  if (acceptance.minChars && value.length < acceptance.minChars) {
-    return 'output has ' + value.length + ' characters; requires at least ' + acceptance.minChars
+  if (!acceptance) return { evidence }
+  if (acceptance.minChars) {
+    const passed = value.length >= acceptance.minChars
+    evidence.push({
+      kind: 'minChars', expected: acceptance.minChars, actual: value.length, passed,
+      message: passed
+        ? 'output length ' + value.length + ' meets minimum ' + acceptance.minChars
+        : 'output has ' + value.length + ' characters; requires at least ' + acceptance.minChars,
+    })
   }
   for (const required of acceptance.mustInclude ?? []) {
-    if (!value.includes(required)) return 'output must include: ' + required
+    const passed = value.includes(required)
+    evidence.push({
+      kind: 'mustInclude', expected: required, actual: passed ? required : '', passed,
+      message: passed ? 'output includes: ' + required : 'output must include: ' + required,
+    })
   }
   for (const forbidden of acceptance.forbidden ?? []) {
-    if (value.includes(forbidden)) return 'output contains forbidden text: ' + forbidden
+    const passed = !value.includes(forbidden)
+    evidence.push({
+      kind: 'forbidden', expected: forbidden, actual: passed ? '' : forbidden, passed,
+      message: passed ? 'output excludes: ' + forbidden : 'output contains forbidden text: ' + forbidden,
+    })
   }
-  return undefined
+  return { evidence, rejection: evidence.find(item => !item.passed)?.message }
 }
 
 for (const layer of args.layers) {
@@ -105,9 +126,10 @@ for (const layer of args.layers) {
     if (value === null) {
       return { ok: false, nodeId, code: 'GRAPH_NODE_FAILED', message: 'child agent did not produce a result' }
     }
-    const rejection = check(node, value)
-    if (rejection) return { ok: false, nodeId, code: 'GRAPH_NODE_REJECTED', message: rejection }
-    return { ok: true, nodeId, value }
+    const assessment = check(node, value)
+    const output = { nodeId, value, evidence: assessment.evidence }
+    if (assessment.rejection) return { ok: false, nodeId, code: 'GRAPH_NODE_REJECTED', message: assessment.rejection, output }
+    return { ok: true, nodeId, value, output }
   }))
   for (let index = 0; index < layer.length; index += 1) {
     const result = results[index]
@@ -123,11 +145,11 @@ for (const layer of args.layers) {
       return {
         ok: false,
         failure: { code: result.code, message: result.message, nodeId: result.nodeId },
-        outputs: orderedOutputs,
+        outputs: result.output ? [...orderedOutputs, result.output] : orderedOutputs,
       }
     }
     values[result.nodeId] = result.value
-    orderedOutputs.push({ nodeId: result.nodeId, value: result.value })
+    orderedOutputs.push(result.output)
   }
 }
 
@@ -188,7 +210,7 @@ export async function prepareGraphWorkflowArguments(
   })
 }
 
-/** Build the only request shape submitted to `ctx.workflowEngine`. */
+/** Build the only request shape submitted to the exact Agent-scoped workflow engine. */
 export function graphWorkflowStartRequest(
   workflow: GraphWorkflowDefinition,
   args: PreparedGraphWorkflowArguments,
@@ -232,7 +254,31 @@ export function decodeGraphWorkflowProgramResult(value: unknown): GraphWorkflowP
     if (typeof output['nodeId'] !== 'string' || typeof output['value'] !== 'string') {
       throw new GraphWorkflowError(`workflow output ${String(index)} is invalid`, 'GRAPH_WORKFLOW_RESULT_INVALID')
     }
-    return { nodeId: output['nodeId'], value: output['value'] }
+    const rawEvidence = output['evidence'] ?? []
+    if (!Array.isArray(rawEvidence)) {
+      throw new GraphWorkflowError(`workflow output ${String(index)} evidence is invalid`, 'GRAPH_WORKFLOW_RESULT_INVALID')
+    }
+    const evidence = rawEvidence.map((raw, evidenceIndex): GraphWorkflowAcceptanceEvidence => {
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new GraphWorkflowError(`workflow output ${String(index)} evidence ${String(evidenceIndex)} is invalid`, 'GRAPH_WORKFLOW_RESULT_INVALID')
+      }
+      const candidate = raw as Record<string, unknown>
+      if ((candidate['kind'] !== 'minChars' && candidate['kind'] !== 'mustInclude' && candidate['kind'] !== 'forbidden')
+        || (typeof candidate['expected'] !== 'string' && typeof candidate['expected'] !== 'number')
+        || (typeof candidate['actual'] !== 'string' && typeof candidate['actual'] !== 'number')
+        || typeof candidate['passed'] !== 'boolean'
+        || typeof candidate['message'] !== 'string') {
+        throw new GraphWorkflowError(`workflow output ${String(index)} evidence ${String(evidenceIndex)} is invalid`, 'GRAPH_WORKFLOW_RESULT_INVALID')
+      }
+      return {
+        kind: candidate['kind'],
+        expected: candidate['expected'],
+        actual: candidate['actual'],
+        passed: candidate['passed'],
+        message: candidate['message'],
+      }
+    })
+    return { nodeId: output['nodeId'], value: output['value'], evidence }
   })
   if (result['ok'] === true && typeof result['deliverable'] === 'string') {
     return deepFreeze({ ok: true, deliverable: result['deliverable'], outputs })

@@ -20,7 +20,7 @@ function draft(overrides: Partial<GraphWorkflowDraft> = {}): GraphWorkflowDraft 
 }
 
 function definition(value = draft()): GraphWorkflowDefinition {
-  return { ...normalizeWorkflowDraft(value, limits), revision: 1, createdAt: 1, updatedAt: 1 }
+  return { ...normalizeWorkflowDraft(value, limits), workspaceId: 'workspace-a', revision: 1, createdAt: 1, updatedAt: 1 }
 }
 
 describe('Graph Workflow domain', () => {
@@ -86,5 +86,24 @@ describe('Graph Workflow domain', () => {
     expect(() => normalizeWorkflowDraft(draft({
       inputs: [{ key: 'brief', label: 'Brief', required: false, defaultValue: 'x'.repeat(1_001) }],
     }), limits)).toThrow(/defaultValue exceeds/)
+  })
+
+  it('normalizes typed inputs and persisted canvas positions', () => {
+    const normalized = normalizeWorkflowDraft(draft({
+      inputs: [
+        { key: 'count', label: 'Count', required: true, type: 'number', defaultValue: '2' },
+        { key: 'approved', label: 'Approved', required: true, type: 'boolean', defaultValue: 'false' },
+        { key: 'tone', label: 'Tone', required: true, type: 'select', options: ['warm', 'direct'], defaultValue: 'warm' },
+      ],
+      nodes: [{ id: 'one', name: 'One', dependsOn: [], prompt: '{{input.count}}', position: { x: 12.4, y: 98.7 } }],
+      outputNode: 'one',
+    }), limits)
+    expect(normalized.nodes[0]?.position).toEqual({ x: 12, y: 99 })
+    const saved = definition(normalized)
+    expect(normalizeRunInput(saved, { count: '3', approved: 'false', tone: 'direct' }, 100))
+      .toEqual({ count: '3', approved: 'false', tone: 'direct' })
+    expect(() => normalizeRunInput(saved, { count: 'many', approved: 'false', tone: 'direct' }, 100)).toThrow(/numeric/)
+    expect(() => normalizeRunInput(saved, { count: '3', approved: 'maybe', tone: 'direct' }, 100)).toThrow(/true.*false/)
+    expect(() => normalizeRunInput(saved, { count: '3', approved: 'true', tone: 'unknown' }, 100)).toThrow(/one of its options/)
   })
 })

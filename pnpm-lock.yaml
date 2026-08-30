@@ -20,6 +20,9 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: link:../deepseek-harness/packages/core/agent
         version: link:../deepseek-harness/packages/core/agent
+      '@deepseek-ai/dsh-api-gateway':
+        specifier: link:../deepseek-harness/packages/api/gateway
+        version: link:../deepseek-harness/packages/api/gateway
       '@deepseek-ai/dsh-api-remotes':
         specifier: link:../deepseek-harness/packages/api/remotes
         version: link:../deepseek-harness/packages/api/remotes
@@ -32,15 +35,24 @@ importers:
       '@deepseek-ai/dsh-client-test-runtime':
         specifier: link:../deepseek-harness/packages/test-support/client-runtime
         version: link:../deepseek-harness/packages/test-support/client-runtime
+      '@deepseek-ai/dsh-client-ui-primitives':
+        specifier: link:../deepseek-harness/packages/client/ui-primitives
+        version: link:../deepseek-harness/packages/client/ui-primitives
       '@deepseek-ai/dsh-client-ui-renderer':
         specifier: link:../deepseek-harness/packages/client/ui-renderer
         version: link:../deepseek-harness/packages/client/ui-renderer
-      '@deepseek-ai/dsh-client-ui-settings':
-        specifier: link:../deepseek-harness/packages/client/ui-settings
-        version: link:../deepseek-harness/packages/client/ui-settings
+      '@deepseek-ai/dsh-client-ui-session':
+        specifier: link:../deepseek-harness/packages/client/ui-session
+        version: link:../deepseek-harness/packages/client/ui-session
+      '@deepseek-ai/dsh-client-ui-sidebar':
+        specifier: link:../deepseek-harness/packages/client/ui-sidebar
+        version: link:../deepseek-harness/packages/client/ui-sidebar
       '@deepseek-ai/dsh-client-ui-slots':
         specifier: link:../deepseek-harness/packages/client/ui-slots
         version: link:../deepseek-harness/packages/client/ui-slots
+      '@deepseek-ai/dsh-client-ui-workspace':
+        specifier: link:../deepseek-harness/packages/client/ui-workspace
+        version: link:../deepseek-harness/packages/client/ui-workspace
       '@deepseek-ai/dsh-llm':
         specifier: link:../deepseek-harness/packages/llm/llm
         version: link:../deepseek-harness/packages/llm/llm
@@ -62,9 +74,15 @@ importers:
       '@deepseek-ai/dsh-typert-protocol':
         specifier: link:../deepseek-harness/packages/typert/protocol
         version: link:../deepseek-harness/packages/typert/protocol
+      '@deepseek-ai/dsh-typert-registry':
+        specifier: link:../deepseek-harness/packages/typert/registry
+        version: link:../deepseek-harness/packages/typert/registry
       '@deepseek-ai/dsh-workflow':
         specifier: link:../deepseek-harness/packages/workflow/workflow
         version: link:../deepseek-harness/packages/workflow/workflow
+      '@deepseek-ai/dsh-workspace':
+        specifier: link:../deepseek-harness/packages/workspace/workspace
+        version: link:../deepseek-harness/packages/workspace/workspace
       '@testing-library/react':
         specifier: ^16.3.2
         version: 16.3.3(@testing-library/dom@10.4.1)(@types/react@18.3.31)(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
@@ -126,15 +144,21 @@ importers:
       '@deepseek-ai/dsh-client-locale':
         specifier: link:../../../deepseek-harness/packages/client/locale
         version: link:../../../deepseek-harness/packages/client/locale
+      '@deepseek-ai/dsh-client-ui-primitives':
+        specifier: link:../../../deepseek-harness/packages/client/ui-primitives
+        version: link:../../../deepseek-harness/packages/client/ui-primitives
       '@deepseek-ai/dsh-client-ui-renderer':
         specifier: link:../../../deepseek-harness/packages/client/ui-renderer
         version: link:../../../deepseek-harness/packages/client/ui-renderer
-      '@deepseek-ai/dsh-client-ui-settings':
-        specifier: link:../../../deepseek-harness/packages/client/ui-settings
-        version: link:../../../deepseek-harness/packages/client/ui-settings
+      '@deepseek-ai/dsh-client-ui-session':
+        specifier: link:../../../deepseek-harness/packages/client/ui-session
+        version: link:../../../deepseek-harness/packages/client/ui-session
       '@deepseek-ai/dsh-client-ui-slots':
         specifier: link:../../../deepseek-harness/packages/client/ui-slots
         version: link:../../../deepseek-harness/packages/client/ui-slots
+      '@deepseek-ai/dsh-client-ui-workspace':
+        specifier: link:../../../deepseek-harness/packages/client/ui-workspace
+        version: link:../../../deepseek-harness/packages/client/ui-workspace
       '@deepseek-ai/dsh-llm':
         specifier: link:../../../deepseek-harness/packages/llm/llm
         version: link:../../../deepseek-harness/packages/llm/llm
@@ -153,6 +177,9 @@ importers:
       '@deepseek-ai/dsh-workflow':
         specifier: link:../../../deepseek-harness/packages/workflow/workflow
         version: link:../../../deepseek-harness/packages/workflow/workflow
+      '@deepseek-ai/dsh-workspace':
+        specifier: link:../../../deepseek-harness/packages/workspace/workspace
+        version: link:../../../deepseek-harness/packages/workspace/workspace
 
 packages:
 

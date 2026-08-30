@@ -5,13 +5,25 @@ const NODE_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 const INPUT_KEY = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
+/** Browser editor control used to collect one normalized string value. */
+export type GraphWorkflowInputType = 'text' | 'multiline' | 'number' | 'boolean' | 'select'
+
 /** One structured value requested before a workflow starts. */
 export interface GraphWorkflowInputDefinition {
   readonly key: string
   readonly label: string
   readonly description?: string
   readonly required: boolean
+  readonly type?: GraphWorkflowInputType
+  /** Allowed values when `type` is `select`. */
+  readonly options?: readonly string[]
   readonly defaultValue?: string
+}
+
+/** Persisted visual position for one node on the editor canvas. */
+export interface GraphWorkflowPosition {
+  readonly x: number
+  readonly y: number
 }
 
 /** Optional model route override for one DAG node. */
@@ -37,6 +49,7 @@ export interface GraphWorkflowNode {
   readonly skill?: string
   readonly llm?: GraphWorkflowLlmSelection
   readonly acceptance?: GraphWorkflowAcceptance
+  readonly position?: GraphWorkflowPosition
 }
 
 /** Editable workflow value before Host-owned revision and timestamps are attached. */
@@ -51,17 +64,38 @@ export interface GraphWorkflowDraft {
 
 /** Persisted immutable DAG definition. */
 export interface GraphWorkflowDefinition extends GraphWorkflowDraft {
+  /** Stable Host Workspace that owns this reusable definition. */
+  readonly workspaceId: string
   readonly revision: number
   readonly createdAt: number
   readonly updatedAt: number
+  /** Revision currently available to normal/model-triggered production runs. */
+  readonly publishedRevision?: number
+  readonly publishedAt?: number
+}
+
+/** Immutable content snapshot retained for compare, explicit execution, and rollback. */
+export interface GraphWorkflowVersion extends GraphWorkflowDraft {
+  readonly workspaceId: string
+  readonly revision: number
+  readonly createdAt: number
+}
+
+export interface GraphWorkflowVersionCatalog {
+  readonly workspaceId: string
+  readonly workflowId: string
+  readonly publishedRevision?: number
+  readonly versions: readonly GraphWorkflowVersion[]
 }
 
 /** Lightweight selector entry returned to the model and browser catalog. */
 export interface GraphWorkflowCatalogEntry {
+  readonly workspaceId: string
   readonly id: string
   readonly name: string
   readonly description: string
   readonly revision: number
+  readonly publishedRevision: number
   readonly inputs: readonly GraphWorkflowInputDefinition[]
   readonly nodeCount: number
   readonly updatedAt: number
@@ -69,8 +103,14 @@ export interface GraphWorkflowCatalogEntry {
 
 /** Complete current workflow catalog. */
 export interface GraphWorkflowCatalog {
+  readonly workspaceId: string
   readonly revision: number
   readonly workflows: readonly GraphWorkflowDefinition[]
+}
+
+/** Read-only browser selector for one exact Host Workspace catalog. */
+export interface GraphWorkflowWorkspaceRequest {
+  readonly workspaceId: string
 }
 
 /** Compare-and-set save request used by the Client editor. */
@@ -85,10 +125,33 @@ export interface RemoveGraphWorkflowRequest {
   readonly expectedRevision: number
 }
 
+/** Publish one retained revision without mutating its immutable content. */
+export interface PublishGraphWorkflowRequest {
+  readonly workflowId: string
+  readonly revision: number
+  readonly expectedRevision: number
+  readonly expectedPublishedRevision?: number
+}
+
+/** Restore retained content as a new head revision. */
+export interface RestoreGraphWorkflowRequest {
+  readonly workflowId: string
+  readonly revision: number
+  readonly expectedRevision: number
+}
+
+export interface GraphWorkflowVersionsRequest extends GraphWorkflowWorkspaceRequest {
+  readonly workflowId: string
+}
+
 /** Input needed to launch one saved definition. */
 export interface StartGraphWorkflowRequest {
   readonly workflowId: string
   readonly input: Readonly<Record<string, string>>
+  /** Omit for the published revision; the browser test bench pins an explicit saved revision. */
+  readonly workflowRevision?: number
+  /** Execute only this node and its transitive ancestors. */
+  readonly targetNodeId?: string
 }
 
 /** Public lifecycle of one DAG run. */
@@ -104,6 +167,17 @@ export interface GraphWorkflowFailure {
   readonly nodeId?: string
 }
 
+export type GraphWorkflowAcceptanceEvidenceKind = 'minChars' | 'mustInclude' | 'forbidden'
+
+/** One deterministic acceptance observation attached to the exact node output. */
+export interface GraphWorkflowAcceptanceEvidence {
+  readonly kind: GraphWorkflowAcceptanceEvidenceKind
+  readonly expected: string | number
+  readonly actual: string | number
+  readonly passed: boolean
+  readonly message: string
+}
+
 /** Live or settled state of one DAG node. */
 export interface GraphWorkflowNodeRunSnapshot {
   readonly nodeId: string
@@ -112,12 +186,14 @@ export interface GraphWorkflowNodeRunSnapshot {
   readonly startedAt?: number
   readonly endedAt?: number
   readonly output?: string
+  readonly evidence?: readonly GraphWorkflowAcceptanceEvidence[]
   readonly error?: GraphWorkflowFailure
 }
 
-/** Whole-value process-local projection consumed by the browser. */
+/** Whole-value run projection consumed live and retained durably once settled. */
 export interface GraphWorkflowRunSnapshot {
   readonly runId: string
+  readonly workspaceId: string
   readonly workflowId: string
   readonly workflowName: string
   readonly workflowRevision: number
@@ -127,14 +203,18 @@ export interface GraphWorkflowRunSnapshot {
   readonly startedAt?: number
   readonly endedAt?: number
   readonly input: Readonly<Record<string, string>>
+  /** Immutable definition snapshot used to render this run after later edits. */
+  readonly workflow: GraphWorkflowDefinition
   readonly nodes: readonly GraphWorkflowNodeRunSnapshot[]
   readonly deliverable?: string
   readonly error?: GraphWorkflowFailure
+  readonly targetNodeId?: string
 }
 
 /** Receipt returned once a browser-started run transfers to service ownership. */
 export interface GraphWorkflowRunReceipt {
   readonly runId: string
+  readonly workspaceId: string
   readonly workflowId: string
   readonly workflowRevision: number
 }
@@ -147,14 +227,62 @@ export interface CancelGraphWorkflowRunRequest {
 /** Foreground result returned to the model-facing execution tool. */
 export interface GraphWorkflowExecutionResult {
   readonly runId: string
+  readonly workspaceId: string
   readonly workflowId: string
   readonly workflowRevision: number
   readonly deliverable: string
 }
 
-/** Current process-local run list for one exact live Agent. */
+/** Live Agent runs combined with durable settled history for its Workspace. */
 export interface GraphWorkflowRunCatalog {
   readonly runs: readonly GraphWorkflowRunSnapshot[]
+}
+
+/** Advisory choices resolved from the current Agent's live skill and LLM registries. */
+export interface GraphWorkflowCapabilityCatalog {
+  readonly skills: readonly {
+    readonly name: string
+    readonly description: string
+    readonly source: string
+  }[]
+  readonly providers: readonly {
+    readonly id: string
+    readonly name: string
+    readonly models: readonly { readonly id: string; readonly name: string; readonly description?: string }[]
+  }[]
+}
+
+export interface GraphWorkflowTestCaseDraft {
+  readonly id: string
+  readonly name: string
+  readonly input: Readonly<Record<string, string>>
+}
+
+export interface GraphWorkflowTestCase extends GraphWorkflowTestCaseDraft {
+  readonly workspaceId: string
+  readonly workflowId: string
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
+export interface GraphWorkflowTestCaseCatalog {
+  readonly workspaceId: string
+  readonly workflowId: string
+  readonly testCases: readonly GraphWorkflowTestCase[]
+}
+
+export interface SaveGraphWorkflowTestCaseRequest {
+  readonly workflowId: string
+  readonly testCase: GraphWorkflowTestCaseDraft
+}
+
+export interface GraphWorkflowTestCasesRequest {
+  readonly workflowId: string
+}
+
+export interface RemoveGraphWorkflowTestCaseRequest {
+  readonly workflowId: string
+  readonly testCaseId: string
 }
 
 /** Deployment limits that affect domain validation. */
@@ -288,6 +416,17 @@ export function normalizeWorkflowDraft(
     if (inputKeys.has(key)) fail(`duplicate workflow input "${key}"`)
     inputKeys.add(key)
     if (typeof item.required !== 'boolean') fail(`workflow input "${key}" requires a boolean required field`)
+    const type = item.type ?? 'text'
+    if (!['text', 'multiline', 'number', 'boolean', 'select'].includes(type)) {
+      fail(`workflow input "${key}" has an unsupported type`)
+    }
+    const options = uniqueStrings(item.options, `workflow input "${key}" options`, 64)
+    if (type === 'select' && (options === undefined || options.length === 0)) {
+      fail(`workflow input "${key}" select options must not be empty`)
+    }
+    if (type !== 'select' && options !== undefined) {
+      fail(`workflow input "${key}" options require type "select"`)
+    }
     const itemDescription = optionalText(item.description, `workflow input "${key}" description`, 300)
     const defaultValue = item.defaultValue === undefined
       ? undefined
@@ -296,10 +435,21 @@ export function normalizeWorkflowDraft(
     if (defaultInputChars > limits.maxInputChars) {
       fail(`workflow input defaults exceed ${String(limits.maxInputChars)} characters`)
     }
+    if (defaultValue !== undefined && type === 'number' && !Number.isFinite(Number(defaultValue))) {
+      fail(`workflow input "${key}" defaultValue must be numeric`)
+    }
+    if (defaultValue !== undefined && type === 'boolean' && defaultValue !== 'true' && defaultValue !== 'false') {
+      fail(`workflow input "${key}" defaultValue must be "true" or "false"`)
+    }
+    if (defaultValue !== undefined && type === 'select' && options?.includes(defaultValue) !== true) {
+      fail(`workflow input "${key}" defaultValue must be one of its options`)
+    }
     return {
       key,
       label: nonEmpty(item.label, `workflow input "${key}" label`, 100),
       required: item.required,
+      ...(item.type === undefined ? {} : { type }),
+      ...(options === undefined ? {} : { options }),
       ...(itemDescription === undefined ? {} : { description: itemDescription }),
       ...(defaultValue === undefined ? {} : { defaultValue }),
     }
@@ -327,6 +477,16 @@ export function normalizeWorkflowDraft(
     const mustInclude = uniqueStrings(item.acceptance?.mustInclude, `node "${nodeId}" acceptance.mustInclude`)
     const forbidden = uniqueStrings(item.acceptance?.forbidden, `node "${nodeId}" acceptance.forbidden`)
     const nodeDescription = optionalText(item.description, `node "${nodeId}" description`, 300)
+    assertOptionalRecord(item.position, `node "${nodeId}" position`)
+    let position: GraphWorkflowPosition | undefined
+    if (item.position !== undefined) {
+      const x = item.position.x
+      const y = item.position.y
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 100_000 || y > 100_000) {
+        fail(`node "${nodeId}" position must contain finite coordinates between 0 and 100000`)
+      }
+      position = { x: Math.round(x), y: Math.round(y) }
+    }
     return {
       id: nodeId,
       name: nonEmpty(item.name, `node "${nodeId}" name`, 100),
@@ -343,6 +503,7 @@ export function normalizeWorkflowDraft(
         ...mustInclude === undefined ? {} : { mustInclude },
         ...forbidden === undefined ? {} : { forbidden },
       } },
+      ...(position === undefined ? {} : { position }),
     }
   })
   const byId = new Map(nodes.map(node => [node.id, node]))
@@ -383,6 +544,16 @@ export function normalizeRunInput(
     if (definition.required && value.trim().length === 0) {
       throw new GraphWorkflowError(`missing required workflow input "${definition.key}"`, 'GRAPH_WORKFLOW_INPUT_INVALID')
     }
+    const type = definition.type ?? 'text'
+    if (value !== '' && type === 'number' && !Number.isFinite(Number(value))) {
+      throw new GraphWorkflowError(`workflow input "${definition.key}" must be numeric`, 'GRAPH_WORKFLOW_INPUT_INVALID')
+    }
+    if (value !== '' && type === 'boolean' && value !== 'true' && value !== 'false') {
+      throw new GraphWorkflowError(`workflow input "${definition.key}" must be "true" or "false"`, 'GRAPH_WORKFLOW_INPUT_INVALID')
+    }
+    if (value !== '' && type === 'select' && definition.options?.includes(value) !== true) {
+      throw new GraphWorkflowError(`workflow input "${definition.key}" must be one of its options`, 'GRAPH_WORKFLOW_INPUT_INVALID')
+    }
     size += value.length
     if (size > maxInputChars) {
       throw new GraphWorkflowError(`workflow input exceeds ${String(maxInputChars)} characters`, 'GRAPH_WORKFLOW_INPUT_INVALID')
@@ -394,11 +565,15 @@ export function normalizeRunInput(
 
 /** Build the lightweight catalog shape used by the model-facing list tool. */
 export function catalogEntries(catalog: GraphWorkflowCatalog): GraphWorkflowCatalogEntry[] {
-  return catalog.workflows.map(workflow => ({
+  return catalog.workflows.filter((workflow): workflow is GraphWorkflowDefinition & { publishedRevision: number } => (
+    workflow.publishedRevision !== undefined && workflow.revision === workflow.publishedRevision
+  )).map(workflow => ({
+    workspaceId: workflow.workspaceId,
     id: workflow.id,
     name: workflow.name,
     description: workflow.description,
     revision: workflow.revision,
+    publishedRevision: workflow.publishedRevision,
     inputs: workflow.inputs,
     nodeCount: workflow.nodes.length,
     updatedAt: workflow.updatedAt,

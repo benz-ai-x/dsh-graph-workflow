@@ -11,6 +11,7 @@ export type GraphWorkflowErrorCode =
   | 'GRAPH_WORKFLOW_INPUT_INVALID'
   | 'GRAPH_WORKFLOW_INVALID'
   | 'GRAPH_WORKFLOW_NOT_FOUND'
+  | 'GRAPH_WORKFLOW_NOT_PUBLISHED'
   | 'GRAPH_WORKFLOW_RESULT_INVALID'
   | 'GRAPH_WORKFLOW_RESULT_TOO_LARGE'
   | 'GRAPH_WORKFLOW_RUN_NOT_FOUND'
@@ -18,6 +19,8 @@ export type GraphWorkflowErrorCode =
   | 'GRAPH_WORKFLOW_SKILL_NOT_FOUND'
   | 'GRAPH_WORKFLOW_STORE_INVALID'
   | 'GRAPH_WORKFLOW_STORE_WRITE_FAILED'
+  | 'GRAPH_WORKFLOW_VERSION_NOT_FOUND'
+  | 'GRAPH_WORKFLOW_WORKSPACE_NOT_FOUND'
 
 /** Machine-routable plugin failure with a bounded public message. */
 export class GraphWorkflowError extends HarnessError {

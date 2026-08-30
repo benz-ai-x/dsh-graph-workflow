@@ -16,6 +16,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as
 function definition(draft: GraphWorkflowDraft): GraphWorkflowDefinition {
   return {
     ...normalizeWorkflowDraft(draft, { maxNodesPerWorkflow: 16, maxPromptChars: 4_000, maxInputChars: 4_000 }),
+    workspaceId: 'workspace-a',
     revision: 1,
     createdAt: 1,
     updatedAt: 1,
@@ -78,7 +79,17 @@ describe('fixed Graph Workflow program', () => {
     expect(result).toEqual({
       ok: false,
       failure: { code: 'GRAPH_NODE_REJECTED', message: 'output must include: A:', nodeId: 'angle-a' },
-      outputs: [],
+      outputs: [{
+        nodeId: 'angle-a',
+        value: 'missing marker',
+        evidence: [{
+          kind: 'mustInclude',
+          expected: 'A:',
+          actual: '',
+          passed: false,
+          message: 'output must include: A:',
+        }],
+      }],
     })
   })
 

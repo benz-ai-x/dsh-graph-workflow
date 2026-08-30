@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "upstream": {
     "repository": "https://github.com/deepseek-ai/deepseek-harness.git",
     "version": "0.1.2-alpha.1",
@@ -11,5 +11,19 @@
     "environmentVariable": "DSH_HARNESS_ROOT",
     "fallbackRelativePath": "../deepseek-harness"
   },
-  "verifiedOn": "2026-08-29"
+  "overlay": {
+    "baseCommit": "cd5ef8148158c3a752a658978873241fdf8e2bbc",
+    "patch": "overlays/deepseek-harness/workspace-resource-slot.patch",
+    "sha256": "ab9019ac362e78f150639abf00b9302fa48ad70246593b1e581b51b39f6aab4a",
+    "paths": [
+      "packages/client/ui-workspace/src/client/contract/slots.ts",
+      "packages/client/ui-workspace/src/client/index.ts",
+      "packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.module.css",
+      "packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx",
+      "packages/client/ui-workspace/tests/apply.client.spec.ts",
+      "packages/client/ui-workspace/tests/browser-styles.client.spec.ts",
+      "packages/client/ui-workspace/tests/workspace-browser.client.spec.tsx"
+    ]
+  },
+  "verifiedOn": "2026-08-30"
 }
